@@ -1,3 +1,42 @@
+// Crea una transacción en Shopify. Si 'sale' no es válida, intenta 'capture'.
+async function createTransactionWithFallback(orderId, { amount, currency, gateway, authorization }) {
+  // Shopify prefiere montos como string con 2 decimales
+  const amt = String(Number(amount).toFixed(2));
+
+  // 1) Intento con 'sale'
+  try {
+    const res1 = await shopify(`/orders/${orderId}/transactions.json`, "POST", {
+      transaction: {
+        kind: "sale",
+        status: "success",
+        amount: amt,
+        currency,
+        gateway: gateway || "MODO (Payway)",
+        authorization: authorization || undefined,
+      },
+    });
+    return { ok: true, kind: "sale", res: res1 };
+  } catch (e) {
+    // Si no es un 422 “sale is not a valid transaction”, relanzo
+    const msg = String(e?.message || "");
+    const is422 = msg.includes("422") && (msg.includes("sale is not a valid transaction") || msg.includes('"kind"'));
+    if (!is422) throw e;
+  }
+
+  // 2) Fallback con 'capture'
+  const res2 = await shopify(`/orders/${orderId}/transactions.json`, "POST", {
+    transaction: {
+      kind: "capture",
+      status: "success",
+      amount: amt,
+      currency,
+      gateway: gateway || "MODO (Payway)",
+      authorization: authorization || undefined,
+    },
+  });
+  return { ok: true, kind: "capture", res: res2 };
+}
+
 // Vercel Serverless Function: MODO/Payway -> Shopify (con validación JWS/JWKS)
 import * as jose from "node-jose";
 
