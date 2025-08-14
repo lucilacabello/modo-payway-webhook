@@ -1,5 +1,5 @@
 // Vercel Serverless Function: MODO/Payway -> Shopify (con validación JWS/JWKS)
-import { JWS, JWK } from "node-jose";
+import * as jose from "node-jose";
 
 // Importante: para comparar objetos de forma estable
 function stableStringify(obj) {
