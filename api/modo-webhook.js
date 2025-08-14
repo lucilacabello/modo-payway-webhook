@@ -25,7 +25,7 @@ async function initModoKeyStore() {
     throw new Error("No se pudo descargar JWKS de MODO: " + t);
   }
   const parsed = await response.json();
-  modoKeyStore = await JWK.asKeyStore(parsed);
+  modoKeyStore = await jose.JWK.asKeyStore(parsed);
   return modoKeyStore;
 }
 
@@ -36,7 +36,7 @@ async function verifyModoSignature(body) {
   const keystore = await initModoKeyStore();
 
   // Verificar la firma y obtener el payload firmado
-  const verification = await JWS.createVerify(keystore).verify(body.signature);
+  const verification = await jose.JWS.createVerify(keystore).verify(body.signature);
   const payloadFromSignature = JSON.parse(verification.payload.toString("utf8"));
 
   // Comparar payload del JWS con el body recibido SIN el campo signature
