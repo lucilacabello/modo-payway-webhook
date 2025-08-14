@@ -3,13 +3,6 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "scripts": {
-    "dev": "vercel dev",
-    "start": "node api/health.js",
-    "test:webhook": "node test/send-webhook.js"
-  },
-  "dependencies": {
-    "@upstash/redis": "^1.28.3",
-    "node-jose": "^2.0.0"
-  }
+  "scripts": { "start": "node api/health.js" },
+  "dependencies": { "node-jose": "^2.0.0" }
 }
