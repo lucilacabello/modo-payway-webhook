@@ -1,15 +1,4 @@
 {
-  "functions": {
-    "api/*.js": {
-      "runtime": "nodejs20.x"
-    }
-  },
-  "regions": [
-    "gru1",
-    "iad1"
-  ],
-  "env": {},
-  "installCommand": "npm install",
-  "buildCommand": "",
-  "outputDirectory": ""
+  "functions": { "api/*.js": { "runtime": "nodejs20.x" } },
+  "regions": ["gru1"]
 }
