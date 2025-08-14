@@ -4,5 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": { "start": "node api/health.js" },
-  "dependencies": { "node-jose": "^2.0.0" }
+  "dependencies": {
+    "node-jose": "^2.0.0"
+  }
 }
