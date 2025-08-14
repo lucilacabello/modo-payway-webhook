@@ -176,36 +176,32 @@ if (!ok) {
       return res.status(200).send("OK (pedido no encontrado)");
     }
 
-    // 5) Mapear estados MODO → Shopify
-    if (status === "ACCEPTED") {
-      await shopify(`/orders/${orderId}/transactions.json`, "POST", {
-        transaction: {
-          kind: "sale",
-          status: "success",
-          gateway: "MODO (Payway)",
-          amount,
-          currency,
-          authorization: authorizationCode || paymentId,
-          test: false,
-        },
-      });
-      return res.status(200).send("OK (aprobado)");
-    }
+  if (status === "ACCEPTED") {
+  const result = await createTransactionWithFallback(orderId, {
+    amount,
+    currency,
+    gateway: "MODO (Payway)",
+    authorization: authorizationCode || paymentId,
+  });
+  console.log(`Transacción creada con kind='${result.kind}'`);
+  return res.status(200).send("OK (aprobado)");
+}
 
-    if (status === "REJECTED") {
-      await shopify(`/orders/${orderId}/transactions.json`, "POST", {
-        transaction: {
-          kind: "sale",
-          status: "failure",
-          gateway: "MODO (Payway)",
-          amount,
-          currency,
-          authorization: authorizationCode || paymentId,
-          test: false,
-        },
-      });
-      return res.status(200).send("OK (rechazado)");
-    }
+if (status === "REJECTED") {
+  // Para rechazo, dejamos registrado el intento como failure (no requiere fallback)
+  await shopify(`/orders/${orderId}/transactions.json`, "POST", {
+    transaction: {
+      kind: "sale",
+      status: "failure",
+      amount: String(Number(amount).toFixed(2)),
+      currency,
+      gateway: "MODO (Payway)",
+      authorization: authorizationCode || paymentId,
+    },
+  });
+  return res.status(200).send("OK (rechazado)");
+}
+
 
     // Estados intermedios: CREATED, SCANNED, PROCESSING
     return res.status(200).send("OK (estado intermedio)");
