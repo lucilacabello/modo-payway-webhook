@@ -99,9 +99,17 @@ export default async function handler(req, res) {
 
     const body = req.body || {};
 
-    // 1) Validar firma JWS/JWKS
-    const ok = await verifyModoSignature(body);
-    if (!ok) return res.status(401).send("Firma inválida");
+  // --- Validación de firma (modo test permitido) ---
+const allowUnsigned = process.env.ALLOW_UNSIGNED_WEBHOOKS === "true";
+
+let ok = true;
+if (!allowUnsigned) {
+  ok = await verifyModoSignature(body); // <-- tu función actual JWS/JWKS
+}
+if (!ok) {
+  return res.status(401).send("Firma inválida");
+}
+
 
     // 2) Extraer campos (ajustar si tu payload difiere)
     const status = String(body.status || body.payment_status || "").toUpperCase();
