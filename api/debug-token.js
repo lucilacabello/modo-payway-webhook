@@ -47,13 +47,18 @@ export default async function handler(req, res) {
     }
   }
 
-  return res.status(200).json({
-    diagnostics: {
-      ua: asciiReport("MODO_USER_AGENT", RAW_UA),
-      user: asciiReport("MODO_USERNAME", RAW_USER),
-      pass: asciiReport("MODO_PASSWORD", RAW_PASS),
-      passFixedDashChanged: RAW_PASS !== passFixedDash
-    },
-    results
-  });
+return res.status(200).json({
+  diagnostics: {
+    ua: asciiReport("MODO_USER_AGENT", RAW_UA),
+    user: asciiReport("MODO_USERNAME", RAW_USER),
+    pass: asciiReport("MODO_PASSWORD", RAW_PASS),
+    passFixedDashChanged: RAW_PASS !== passFixedDash,
+    base: BASE   // <--- agrega esto para ver la BASE en runtime
+  },
+  results
+});
+
 }
+
+
+
