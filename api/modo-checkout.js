@@ -26,7 +26,15 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Falta orderId o amount_cents" });
     }
 
-    amountFloat = Number(amountFloat.toFixed(2));
+  body: JSON.stringify({
+  description: description || `Pedido ${orderId}`,
+  amount: Number(amountFloat.toFixed(2)), // <-- aseguramos número
+  currency,
+  cc_code: CC_CODE,
+  processor_code: PROCESSOR,
+  external_intention_id: String(orderId)
+}),
+
 
     // --- Variables de entorno ---
     const BASE = process.env.MODO_BASE_URL;                          // https://merchants.playdigital.com.ar
