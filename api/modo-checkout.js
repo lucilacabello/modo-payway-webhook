@@ -1,5 +1,4 @@
 // /api/modo-checkout.js
-
 export default async function handler(req, res) {
   try {
     if (req.method !== "POST") {
@@ -26,15 +25,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Falta orderId o amount_cents" });
     }
 
-  body: JSON.stringify({
-  description: description || `Pedido ${orderId}`,
-  amount: Number(amountFloat.toFixed(2)), // <-- aseguramos número
-  currency,
-  cc_code: CC_CODE,
-  processor_code: PROCESSOR,
-  external_intention_id: String(orderId)
-}),
-
+    amountFloat = Number(amountFloat.toFixed(2));
 
     // --- Variables de entorno ---
     const BASE = process.env.MODO_BASE_URL;                          // https://merchants.playdigital.com.ar
@@ -66,7 +57,7 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({
         description: description || `Pedido ${orderId}`,
-        amount: amountFloat.toFixed(2), // ejemplo: 100 => "1.00"
+        amount: Number(amountFloat.toFixed(2)),  // <-- ahora sí como número
         currency,
         cc_code: CC_CODE,
         processor_code: PROCESSOR,
