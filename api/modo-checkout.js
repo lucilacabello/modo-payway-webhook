@@ -1,17 +1,45 @@
 // /api/modo-checkout.js
 export default async function handler(req, res) {
-  // CORS básico para Shopify
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Método no permitido' });
-
   try {
-    const { orderId, amount_cents, currency = 'ARS' } = req.body || {};
-    if (!orderId || !amount_cents) {
-      return res.status(400).json({ error: 'Falta orderId o amount_cents' });
+    if (req.method !== "POST") {
+      return res.status(405).json({ error: "Method not allowed" });
     }
+
+    const { orderId, amount, amount_cents, currency = "ARS", description = "" } = req.body || {};
+
+    // Normalizar amount
+    let amountFloat = null;
+    if (typeof amount === "number") {
+      amountFloat = amount;
+    } else if (typeof amount_cents === "number") {
+      amountFloat = amount_cents / 100;
+    }
+
+    if (!orderId || !amountFloat) {
+      return res.status(400).json({ error: "Falta orderId o amount_cents" });
+    }
+
+    amountFloat = Number(amountFloat.toFixed(2));
+
+    // armar payload de MODO
+    const bodyPR = {
+      description,
+      amount: amountFloat,
+      currency,
+      cc_code: process.env.MODO_CC_CODE,
+      processor_code: process.env.MODO_PROCESSOR_CODE,
+      external_intention_id: orderId
+    };
+
+    console.log("Payload que mando a MODO:", bodyPR);
+
+    // fetch a MODO...
+    // ...
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+}
 
     const BASE = process.env.MODO_BASE_URL;                          // https://merchants.playdigital.com.ar
     const USER = process.env.MODO_USERNAME;                          // GARDENLIFESA-373602-production
