@@ -1,213 +1,51 @@
-// Crea una transacción en Shopify. Si 'sale' no es válida, intenta 'capture'.
-async function createTransactionWithFallback(orderId, { amount, currency, gateway, authorization }) {
-  // Shopify prefiere montos como string con 2 decimales
-  const amt = String(Number(amount).toFixed(2));
+// --- dentro de tu handler, apenas parseás el body del webhook ---
+const rawStatus = String(body.status || "").toUpperCase();
 
-  // 1) Intento con 'sale'
-  try {
-    const res1 = await shopify(`/orders/${orderId}/transactions.json`, "POST", {
-      transaction: {
-        kind: "sale",
-        status: "success",
-        amount: amt,
-        currency,
-        gateway: gateway || "MODO (Payway)",
-        authorization: authorization || undefined,
-      },
+// Normalización minimalista por si alguna integración envía "APPROVED"
+const status = rawStatus === "APPROVED" ? "ACCEPTED" : rawStatus;
+
+// ✅ PRIORIDAD a external_intention_id (by the book)
+//   fallback: external_reference, order_id, reference, order_reference
+const externalRef = String(
+  body.external_intention_id
+  || body.external_reference
+  || body.order_id
+  || body.reference
+  || body.order_reference
+  || ""
+).trim();
+
+if (!externalRef) {
+  console.warn("Webhook sin external reference/intention id", body);
+  return res.status(400).json({ ok: false, error: "missing_external_reference" });
+}
+
+// (Si tu función resolvía la orden acá, dejala igual pero usando externalRef)
+const { orderId, orderName } = await resolveOrderFromExternalRef(externalRef);
+// ... el resto de tu lógica sigue igual ...
+
+// Ejemplo de switch sin tocar tu lógica:
+switch (status) {
+  case "ACCEPTED":
+    // marcar pagada / crear transaction success
+    await markOrderPaidInShopify({ orderId, body });
+    break;
+
+  case "REJECTED":
+    // etiquetar/tomar acción de rechazo
+    await markOrderRejectedInShopify({ orderId, body });
+    break;
+
+  case "SCANNED":
+  case "PROCESSING":
+  default:
+    // solo log o note, sin efectos contables
+    await addOrderNoteInShopify({
+      orderId,
+      note: `MODO: ${status} - ${body.payment_id || ""}`.trim()
     });
-    return { ok: true, kind: "sale", res: res1 };
-  } catch (e) {
-    // Si no es un 422 “sale is not a valid transaction”, relanzo
-    const msg = String(e?.message || "");
-    const is422 = msg.includes("422") && (msg.includes("sale is not a valid transaction") || msg.includes('"kind"'));
-    if (!is422) throw e;
-  }
-
-  // 2) Fallback con 'capture'
-  const res2 = await shopify(`/orders/${orderId}/transactions.json`, "POST", {
-    transaction: {
-      kind: "capture",
-      status: "success",
-      amount: amt,
-      currency,
-      gateway: gateway || "MODO (Payway)",
-      authorization: authorization || undefined,
-    },
-  });
-  return { ok: true, kind: "capture", res: res2 };
+    break;
 }
 
-// Vercel Serverless Function: MODO/Payway -> Shopify (con validación JWS/JWKS)
-import * as jose from "node-jose";
+return res.status(200).json({ ok: true });
 
-// Importante: para comparar objetos de forma estable
-function stableStringify(obj) {
-  return JSON.stringify(obj, Object.keys(obj).sort());
-}
-
-export const config = {
-  api: {
-    bodyParser: true, // JWS viene dentro del JSON (campo signature). Podemos parsear JSON normal.
-  },
-};
-
-let modoKeyStore = null;
-
-async function initModoKeyStore() {
-  if (modoKeyStore) return modoKeyStore;
-  const jwksUrl =
-    process.env.MODO_JWKS_URL ||
-    "https://merchants.preprod.playdigital.com.ar/v2/payment-requests/.well-known/jwks.json";
-  const response = await fetch(jwksUrl);
-  if (!response.ok) {
-    const t = await response.text();
-    throw new Error("No se pudo descargar JWKS de MODO: " + t);
-  }
-  const parsed = await response.json();
-  modoKeyStore = await jose.JWK.asKeyStore(parsed);
-  return modoKeyStore;
-}
-
-async function verifyModoSignature(body) {
-  // body.signature debe existir y ser un JWS en formato compact o JSON
-  if (!body || !body.signature) return false;
-
-  const keystore = await initModoKeyStore();
-
-  // Verificar la firma y obtener el payload firmado
-  const verification = await jose.JWS.createVerify(keystore).verify(body.signature);
-  const payloadFromSignature = JSON.parse(verification.payload.toString("utf8"));
-
-  // Comparar payload del JWS con el body recibido SIN el campo signature
-  const { signature, ...bodyWithoutSig } = body;
-
-  // Igualamos tipos básicos por si amount llega string/number
-  if (payloadFromSignature.amount && bodyWithoutSig.amount) {
-    payloadFromSignature.amount = String(payloadFromSignature.amount);
-    bodyWithoutSig.amount = String(bodyWithoutSig.amount);
-  }
-
-  return stableStringify(payloadFromSignature) === stableStringify(bodyWithoutSig);
-}
-
-// --- Shopify helpers ---
-async function shopify(path, method = "GET", body) {
-  const domain = process.env.SHOPIFY_STORE_DOMAIN;
-  const token = process.env.SHOPIFY_ADMIN_TOKEN;
-  const version = process.env.SHOPIFY_API_VERSION || "2024-04";
-  if (!domain || !token) throw new Error("Faltan SHOPIFY_STORE_DOMAIN o SHOPIFY_ADMIN_TOKEN");
-  const url = `https://${domain}/admin/api/${version}${path}`;
-  const res = await fetch(url, {
-    method,
-    headers: {
-      "X-Shopify-Access-Token": token,
-      "Content-Type": "application/json",
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Shopify ${method} ${path} ${res.status}: ${text}`);
-  }
-  return res.json();
-}
-
-async function resolveOrderId(externalRef) {
-  if (!externalRef) return null;
-  // Si es numérico, intentamos directo
-  if (/^\d+$/.test(String(externalRef))) {
-    try {
-      const data = await shopify(`/orders/${externalRef}.json`, "GET");
-      return data?.order?.id || null;
-    } catch { /* luego probamos por name */ }
-  }
-  const name = externalRef.startsWith("#") ? externalRef : `#${externalRef}`;
-  const q = encodeURIComponent(name);
-  const data = await shopify(`/orders.json?name=${q}&status=any&limit=1`, "GET");
-  const order = (data.orders || [])[0];
-  return order ? order.id : null;
-}
-
-// Idempotencia simple con memoria (en producción, usar Redis/DB)
-globalThis.__processed ||= new Set();
-const seen = globalThis.__processed;
-
-export default async function handler(req, res) {
-  try {
-    if (req.method !== "POST") return res.status(405).json({ error: "Method Not Allowed" });
-
-    const body = req.body || {};
-
-  // --- Validación de firma (modo test permitido) ---
-const allowUnsigned = process.env.ALLOW_UNSIGNED_WEBHOOKS === "true";
-
-let ok = true;
-if (!allowUnsigned) {
-  ok = await verifyModoSignature(body); // <-- tu función actual JWS/JWKS
-}
-if (!ok) {
-  return res.status(401).send("Firma inválida");
-}
-
-
-    // 2) Extraer campos (ajustar si tu payload difiere)
-    const status = String(body.status || body.payment_status || "").toUpperCase();
-    const amount = String(body.amount ?? body.total_amount ?? "");
-    const currency = body.currency || "ARS";
-    const paymentId = String(body.payment_id || body.id || body.txn_id || "");
-    const externalRef = String(body.external_reference || body.order_id || body.reference || body.order_reference || "");
-    const authorizationCode = String(body.authorization_code || body.auth_code || "");
-
-    if (!paymentId || !externalRef) {
-      // Respondemos 200 para no generar loops; loguear para análisis
-      console.error("Webhook incompleto. paymentId/externalRef faltantes.", { paymentId, externalRef });
-      return res.status(200).send("OK (faltan campos)");
-    }
-
-    // 3) Idempotencia
-    const key = `modo:${paymentId}`;
-    if (seen.has(key)) return res.status(200).send("OK (duplicado)");
-    seen.add(key);
-
-    // 4) Resolver pedido en Shopify
-    const orderId = await resolveOrderId(externalRef);
-    if (!orderId) {
-      console.error("Pedido no encontrado por external_reference:", externalRef);
-      return res.status(200).send("OK (pedido no encontrado)");
-    }
-
-  if (status === "ACCEPTED") {
-  const result = await createTransactionWithFallback(orderId, {
-    amount,
-    currency,
-    gateway: "MODO (Payway)",
-    authorization: authorizationCode || paymentId,
-  });
-  console.log(`Transacción creada con kind='${result.kind}'`);
-  return res.status(200).send("OK (aprobado)");
-}
-
-if (status === "REJECTED") {
-  // Para rechazo, dejamos registrado el intento como failure (no requiere fallback)
-  await shopify(`/orders/${orderId}/transactions.json`, "POST", {
-    transaction: {
-      kind: "sale",
-      status: "failure",
-      amount: String(Number(amount).toFixed(2)),
-      currency,
-      gateway: "MODO (Payway)",
-      authorization: authorizationCode || paymentId,
-    },
-  });
-  return res.status(200).send("OK (rechazado)");
-}
-
-
-    // Estados intermedios: CREATED, SCANNED, PROCESSING
-    return res.status(200).send("OK (estado intermedio)");
-  } catch (err) {
-    console.error("Error en webhook:", err);
-    // Responder 200 para evitar tormenta de reintentos; ajustar a 500 si preferís que reintenten
-    return res.status(200).send("OK (error manejado)");
-  }
-}
