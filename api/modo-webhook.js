@@ -1,51 +1,33 @@
-// --- dentro de tu handler, apenas parseás el body del webhook ---
-const rawStatus = String(body.status || "").toUpperCase();
+// /api/modo-webhook.js (bypass de firma para test)
 
-// Normalización minimalista por si alguna integración envía "APPROVED"
-const status = rawStatus === "APPROVED" ? "ACCEPTED" : rawStatus;
+export const config = { api: { bodyParser: { sizeLimit: '1mb' } } };
 
-// ✅ PRIORIDAD a external_intention_id (by the book)
-//   fallback: external_reference, order_id, reference, order_reference
-const externalRef = String(
-  body.external_intention_id
-  || body.external_reference
-  || body.order_id
-  || body.reference
-  || body.order_reference
-  || ""
-).trim();
+export default async function handler(req, res) {
+  try {
+    if (req.method !== 'POST') {
+      return res.status(405).json({ error: 'METHOD_NOT_ALLOWED' });
+    }
 
-if (!externalRef) {
-  console.warn("Webhook sin external reference/intention id", body);
-  return res.status(400).json({ ok: false, error: "missing_external_reference" });
+    const allowUnsigned = String(process.env.ALLOW_UNSIGNED_WEBHOOKS || '').toLowerCase() === 'true';
+
+    // LOG para ver el body en Vercel Logs
+    console.log('MODO WEBHOOK TEST:', JSON.stringify(req.body));
+
+    // Si más adelante querés validar firma, hacelo acá
+    if (!allowUnsigned) {
+      // TODO: verify signature/JWKS...
+      return res.status(400).json({ error: 'SIGNATURE_REQUIRED_FOR_TEST' });
+    }
+
+    // Simulá side-effect: si ACCEPTED -> OK
+    if (String(req.body?.status).toUpperCase() === 'ACCEPTED') {
+      return res.status(200).json({ ok: true, simulated: true });
+    }
+
+    return res.status(200).json({ ok: true, note: 'Non-ACCEPTED status' });
+  } catch (e) {
+    console.error('WEBHOOK_TEST_ERROR:', e);
+    return res.status(500).json({ error: 'SERVER_ERROR', message: e?.message || String(e) });
+  }
 }
-
-// (Si tu función resolvía la orden acá, dejala igual pero usando externalRef)
-const { orderId, orderName } = await resolveOrderFromExternalRef(externalRef);
-// ... el resto de tu lógica sigue igual ...
-
-// Ejemplo de switch sin tocar tu lógica:
-switch (status) {
-  case "ACCEPTED":
-    // marcar pagada / crear transaction success
-    await markOrderPaidInShopify({ orderId, body });
-    break;
-
-  case "REJECTED":
-    // etiquetar/tomar acción de rechazo
-    await markOrderRejectedInShopify({ orderId, body });
-    break;
-
-  case "SCANNED":
-  case "PROCESSING":
-  default:
-    // solo log o note, sin efectos contables
-    await addOrderNoteInShopify({
-      orderId,
-      note: `MODO: ${status} - ${body.payment_id || ""}`.trim()
-    });
-    break;
-}
-
-return res.status(200).json({ ok: true });
 
