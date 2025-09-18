@@ -1,106 +1,77 @@
 // /api/modo-webhook.js
-// Webhook de MODO: completa Draft Order cuando status === "APPROVED"
+// Completa la Draft Order en Shopify cuando MODO envía APPROVED.
 
-export const config = { api: { bodyParser: { sizeLimit: "1mb" } } };
-
-async function completeDraft(draftId) {
-  const shop = process.env.SHOPIFY_SHOP;
-  const token = process.env.SHOPIFY_ADMIN_TOKEN;
-  if (!shop || !token) {
-    throw new Error("ENV_MISSING_SHOPIFY_SHOP_OR_TOKEN");
-  }
-
-  const url = `https://${shop}/admin/api/2024-10/draft_orders/${draftId}/complete.json`;
-
-  const resp = await fetch(url, {
-    method: "PUT",
-    headers: {
-      "X-Shopify-Access-Token": token,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      payment_pending: false, // ya está pago por MODO
-      payment_gateway: "MODO",
-    }),
-  });
-
-  const data = await resp.json().catch(() => ({}));
-  if (!resp.ok) {
-    const msg = `[SHOPIFY][DRAFT_COMPLETE][ERR] ${resp.status}`;
-    console.error(msg, data);
-    throw new Error(`${msg}`);
-  }
-
-  return data; // incluye order creada
-}
-
-export default async function handler(req, res) {
+module.exports = async (req, res) => {
   try {
     if (req.method !== "POST") {
       return res.status(405).json({ error: "METHOD_NOT_ALLOWED" });
     }
 
-    const allowUnsigned =
-      String(process.env.ALLOW_UNSIGNED_WEBHOOKS || "")
-        .toLowerCase() === "true";
+    // Para pruebas: permití llamadas sin firma
+    const allowUnsigned = String(process.env.ALLOW_UNSIGNED_WEBHOOKS || "").toLowerCase() === "true";
 
-    // TODO: si después validás firma/JWT, hacelo acá.
+    // TODO: si quisieras validar firma/JWT de MODO, hacelo acá.
     if (!allowUnsigned) {
-      return res.status(400).json({ error: "SIGNATURE_REQUIRED" });
+      // return res.status(401).json({ error: "SIGNATURE_REQUIRED" });
     }
 
     const payload = req.body || {};
-    console.error("[MODO][WEBHOOK] payload:", JSON.stringify(payload));
+    console.log("[MODO][WEBHOOK] payload:", JSON.stringify(payload));
 
     const status = String(payload.status || "").toUpperCase();
-    const draftId =
-      payload?.metadata?.draft_id ||
-      payload?.metadata?.draftId ||
-      payload?.metadata?.draftID;
+    const draft_id = payload?.metadata?.draft_id; // 👈 viene desde payment-request
 
-    if (status === "APPROVED") {
-      if (!draftId) {
-        console.error("[MODO][WEBHOOK] Falta metadata.draft_id");
-        return res.status(200).json({
-          ok: true,
-          note: "APPROVED sin draft_id; no se completó Draft",
-        });
-      }
-
-      try {
-        const result = await completeDraft(draftId);
-        const orderId = result?.order?.id || null;
-        console.error("[SHOPIFY][DRAFT_COMPLETE][OK]", {
-          draft_id: draftId,
-          order_id: orderId,
-        });
-
-        return res.status(200).json({
-          ok: true,
-          action: "draft_completed",
-          draft_id: draftId,
-          order_id: orderId,
-        });
-      } catch (e) {
-        // responder 500 hace que MODO reintente el webhook
-        return res.status(500).json({
-          ok: false,
-          error: "DRAFT_COMPLETE_FAIL",
-          message: e?.message || String(e),
-        });
-      }
+    if (!draft_id) {
+      return res.status(400).json({ error: "MISSING_DRAFT_ID_IN_METADATA" });
     }
 
-    // Otros estados: ACCEPTED/REJECTED/PENDING...
-    return res.status(200).json({ ok: true, status, note: "no-op" });
-  } catch (e) {
-    console.error("[MODO][WEBHOOK][ERROR]", e);
-    return res.status(500).json({
-      error: "SERVER_ERROR",
-      message: e?.message || String(e),
-    });
-  }
-}
+    if (status !== "APPROVED") {
+      // Para otros estados, no hacemos nada (idempotente)
+      return res.status(200).json({ ok: true, ignored: true, status, draft_id });
+    }
 
-}
+    // === Completar la draft en Shopify ===
+    const shop  = process.env.SHOPIFY_SHOP;
+    const token = process.env.SHOPIFY_ADMIN_TOKEN;
+    if (!shop || !token) {
+      return res.status(500).json({ error: "ENV_MISSING_SHOPIFY" });
+    }
+
+    // Marcamos como pagada (payment_pending: false) y con gateway "MODO"
+    const resp = await fetch(`https://${shop}/admin/api/2024-10/draft_orders/${draft_id}/complete.json`, {
+      method: "PUT", // Shopify acepta PUT para /complete.json
+      headers: {
+        "X-Shopify-Access-Token": token,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        payment_pending: false,
+        payment_gateway: "MODO"
+      })
+    });
+
+    const data = await resp.json().catch(() => ({}));
+
+    if (!resp.ok) {
+      // Si ya estaba completada, lo tratamos como éxito idempotente
+      const msg = (data && (data.errors || data.error)) || data;
+      const already = JSON.stringify(msg || "").includes("has already been completed");
+      if (already) {
+        console.log("[SHOPIFY][DRAFT_COMPLETE][ALREADY]", { draft_id });
+        return res.status(200).json({ ok: true, already_completed: true, draft_id });
+      }
+      console.error("[SHOPIFY][DRAFT_COMPLETE][ERROR]", { status: resp.status, data });
+      return res.status(resp.status).json({ error: "DRAFT_COMPLETE_FAIL", detail: data });
+    }
+
+    const orderId = data?.draft_order?.order_id || data?.order?.id;
+    console.log("[SHOPIFY][DRAFT_COMPLETE][OK]", { draft_id, order_id: orderId });
+
+    return res.status(200).json({ ok: true, completed: true, draft_id, order_id: orderId });
+  } catch (e) {
+    console.error("[WEBHOOK_ERROR]", e);
+    return res.status(500).json({ error: "SERVER_ERROR", message: e.message });
+  }
+};
+
 
