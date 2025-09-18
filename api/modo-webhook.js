@@ -9,7 +9,7 @@ export default async function handler(req, res) {
       return res.status(405).json({ error: "METHOD_NOT_ALLOWED" });
     }
 
-    // Body puede venir string o parseado; normalizamos:
+    // Normalizamos body (puede venir string)
     let payload = req.body ?? {};
     if (typeof payload === "string") {
       try { payload = JSON.parse(payload); } catch { payload = {}; }
@@ -17,13 +17,14 @@ export default async function handler(req, res) {
 
     console.log("[MODO][WEBHOOK][IN]", trace, JSON.stringify(payload));
 
+    // Para pruebas, permitir sin firma
     const allowUnsigned = String(process.env.ALLOW_UNSIGNED_WEBHOOKS || "").toLowerCase() === "true";
     if (!allowUnsigned) {
       // TODO: validar firma/JWT de MODO
       // return res.status(401).json({ error: "SIGNATURE_REQUIRED" });
     }
 
-    const status = String(payload.status || "").toUpperCase();
+    const status   = String(payload.status || "").toUpperCase();
     const draft_id = payload?.metadata?.draft_id;
 
     if (!draft_id) {
@@ -31,14 +32,15 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "MISSING_DRAFT_ID_IN_METADATA" });
     }
 
+    // Ignoramos estados no-APPROVED (idempotente)
     if (status !== "APPROVED") {
-      console.log("[WEBHOOK] estado no manejado (idempotente):", status, trace);
+      console.log("[WEBHOOK] estado no manejado:", status, trace);
       return res.status(200).json({ ok: true, ignored: true, status, draft_id });
     }
 
+    // ENVs Shopify
     const shop  = process.env.SHOPIFY_SHOP;
     const token = process.env.SHOPIFY_ADMIN_TOKEN;
-
     const missing = [];
     if (!shop)  missing.push("SHOPIFY_SHOP");
     if (!token) missing.push("SHOPIFY_ADMIN_TOKEN");
@@ -47,36 +49,38 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: "ENV_MISSING_SHOPIFY", missing });
     }
 
-    const url  = `https://${shop}/admin/api/2024-10/draft_orders/${draft_id}/complete.json`;
-    const body = { payment_pending: false, payment_gateway: "MODO" };
-
-    console.log("[SHOPIFY][DRAFT_COMPLETE][REQ]", trace, url, body);
+    // ---- Completar la draft (POST sin body) ----
+    const url = `https://${shop}/admin/api/2024-10/draft_orders/${draft_id}/complete.json`;
+    console.log("[SHOPIFY][DRAFT_COMPLETE][REQ]", trace, url);
 
     const resp = await fetch(url, {
-      method: "POST", // /complete.json es POST
+      method: "POST",
       headers: {
         "X-Shopify-Access-Token": token,
+        // Content-Type no es requerido, pero no molesta
         "Content-Type": "application/json"
-      },
-      body: JSON.stringify(body)
+      }
+      // SIN body
     });
 
+    // Puede devolver 200 con JSON de la draft/order; o 202/204 sin body
     let data = {};
-    try { data = await resp.json(); } catch {}
+    try { data = await resp.json(); } catch { /* no-op */ }
 
     console.log("[SHOPIFY][DRAFT_COMPLETE][RESP]", trace, resp.status, data);
 
     if (!resp.ok) {
+      // Si ya estaba completada, lo tomamos como OK idempotente
       const msg = (data && (data.errors || data.error)) || data;
       const already = JSON.stringify(msg || "").includes("has already been completed");
       if (already) {
         console.log("[SHOPIFY][DRAFT_COMPLETE][ALREADY]", trace, { draft_id });
         return res.status(200).json({ ok: true, already_completed: true, draft_id });
       }
-      return res.status(resp.status).json({ error: "DRAFT_COMPLETE_FAIL", detail: data });
+      return res.status(resp.status).json({ error: "DRAFT_COMPLETE_FAIL", detail: data || {} });
     }
 
-    const orderId = data?.draft_order?.order_id || data?.order?.id;
+    const orderId = data?.draft_order?.order_id || data?.order?.id || null;
     console.log("[SHOPIFY][DRAFT_COMPLETE][OK]", trace, { draft_id, order_id: orderId });
 
     return res.status(200).json({ ok: true, completed: true, draft_id, order_id: orderId });
