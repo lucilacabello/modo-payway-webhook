@@ -2,7 +2,7 @@
 // Completa la Draft Order en Shopify cuando MODO envía APPROVED.
 
 export default async function handler(req, res) {
-  const trace = `W-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,8)}`;
+  const trace = `W-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
   try {
     if (req.method !== "POST") {
@@ -17,7 +17,7 @@ export default async function handler(req, res) {
 
     console.log("[MODO][WEBHOOK][IN]", trace, JSON.stringify(payload));
 
-    // Para pruebas, permitir sin firma
+    // (Opcional) validación de firma desactivada por ahora
     const allowUnsigned = String(process.env.ALLOW_UNSIGNED_WEBHOOKS || "").toLowerCase() === "true";
     if (!allowUnsigned) {
       // TODO: validar firma/JWT de MODO
@@ -39,8 +39,8 @@ export default async function handler(req, res) {
     }
 
     // ENVs Shopify
-    const shop  = process.env.SHOPIFY_SHOP;
-    const token = process.env.SHOPIFY_ADMIN_TOKEN;
+    const shop  = process.env.SHOPIFY_SHOP;           // p.ej: cfafc3-c5.myshopify.com
+    const token = process.env.SHOPIFY_ADMIN_TOKEN;    // Admin API access token
     const missing = [];
     if (!shop)  missing.push("SHOPIFY_SHOP");
     if (!token) missing.push("SHOPIFY_ADMIN_TOKEN");
@@ -49,7 +49,7 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: "ENV_MISSING_SHOPIFY", missing });
     }
 
-    // ---- Completar la draft (POST sin body) ----
+    // ---- Completar la draft ----
     const url = `https://${shop}/admin/api/2024-10/draft_orders/${draft_id}/complete.json`;
     console.log("[SHOPIFY][DRAFT_COMPLETE][REQ]", trace, url);
 
@@ -57,23 +57,22 @@ export default async function handler(req, res) {
       method: "POST",
       headers: {
         "X-Shopify-Access-Token": token,
-        // Content-Type no es requerido, pero no molesta
+        "Accept": "application/json",
         "Content-Type": "application/json"
-      }
-      // SIN body
+      },
+      // Enviar SIEMPRE un JSON válido. Cambiá a true si querés que quede como pendiente.
+      body: JSON.stringify({ payment_pending: false })
     });
 
-    // Puede devolver 200 con JSON de la draft/order; o 202/204 sin body
-    let data = {};
-    try { data = await resp.json(); } catch { /* no-op */ }
+    const text = await resp.text();
+    let data; try { data = JSON.parse(text); } catch { data = { raw: text }; }
 
     console.log("[SHOPIFY][DRAFT_COMPLETE][RESP]", trace, resp.status, data);
 
     if (!resp.ok) {
       // Si ya estaba completada, lo tomamos como OK idempotente
-      const msg = (data && (data.errors || data.error)) || data;
-      const already = JSON.stringify(msg || "").includes("has already been completed");
-      if (already) {
+      const msg = JSON.stringify(data || {});
+      if (msg.includes("has already been completed")) {
         console.log("[SHOPIFY][DRAFT_COMPLETE][ALREADY]", trace, { draft_id });
         return res.status(200).json({ ok: true, already_completed: true, draft_id });
       }
