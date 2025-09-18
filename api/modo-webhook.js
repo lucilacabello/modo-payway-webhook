@@ -1,90 +1,96 @@
-// /api/modo-webhook.js (ESM)
-// Completa la Draft Order en Shopify cuando MODO envía APPROVED.
-
+// /api/modo-webhook.js
 export default async function handler(req, res) {
-  const trace = `W-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const trace = `W-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,8)}`;
 
   try {
-    if (req.method !== "POST") {
-      return res.status(405).json({ error: "METHOD_NOT_ALLOWED" });
-    }
+    if (req.method !== "POST") return res.status(405).json({ error: "METHOD_NOT_ALLOWED" });
 
-    // Normalizamos body (puede venir string)
+    // --- payload ---
     let payload = req.body ?? {};
-    if (typeof payload === "string") {
-      try { payload = JSON.parse(payload); } catch { payload = {}; }
-    }
-
-    console.log("[MODO][WEBHOOK][IN]", trace, JSON.stringify(payload));
-
-    // (Opcional) validación de firma desactivada por ahora
-    const allowUnsigned = String(process.env.ALLOW_UNSIGNED_WEBHOOKS || "").toLowerCase() === "true";
-    if (!allowUnsigned) {
-      // TODO: validar firma/JWT de MODO
-      // return res.status(401).json({ error: "SIGNATURE_REQUIRED" });
-    }
+    if (typeof payload === "string") { try { payload = JSON.parse(payload); } catch { payload = {}; } }
+    console.log("[MODO][IN]", trace, payload);
 
     const status   = String(payload.status || "").toUpperCase();
-    const draft_id = payload?.metadata?.draft_id;
+    const draft_id = payload?.metadata?.draft_id || payload?.draft_id;
+    if (!draft_id) return res.status(400).json({ error: "MISSING_DRAFT_ID_IN_METADATA" });
+    if (status !== "APPROVED") return res.status(200).json({ ok: true, ignored: true, status, draft_id });
 
-    if (!draft_id) {
-      console.error("[WEBHOOK][ERR] falta metadata.draft_id", trace);
-      return res.status(400).json({ error: "MISSING_DRAFT_ID_IN_METADATA" });
-    }
+    // ENVs
+    const shop     = process.env.SHOPIFY_SHOP;            // ej: cfafc3-c5.myshopify.com
+    const token    = process.env.SHOPIFY_ADMIN_TOKEN;     // Admin API
+    const version  = process.env.SHOPIFY_API_VERSION || "2025-07";
+    if (!shop || !token) return res.status(500).json({ error: "ENV_MISSING_SHOPIFY", missing: { shop: !!shop, token: !!token } });
 
-    // Ignoramos estados no-APPROVED (idempotente)
-    if (status !== "APPROVED") {
-      console.log("[WEBHOOK] estado no manejado:", status, trace);
-      return res.status(200).json({ ok: true, ignored: true, status, draft_id });
-    }
+    // Helper de log
+    const readResp = async (resp) => {
+      const text = await resp.text();
+      const headers = Object.fromEntries([...resp.headers.entries()]);
+      const rid = headers["x-request-id"] || headers["x-shopify-request-id"] || null;
+      console.log("[SHOPIFY][RESP]", trace, resp.status, { url: resp.url, rid, headers, body: text });
+      return { ok: resp.ok, status: resp.status, text, headers, rid };
+    };
 
-    // ENVs Shopify
-    const shop  = process.env.SHOPIFY_SHOP;           // p.ej: cfafc3-c5.myshopify.com
-    const token = process.env.SHOPIFY_ADMIN_TOKEN;    // Admin API access token
-    const missing = [];
-    if (!shop)  missing.push("SHOPIFY_SHOP");
-    if (!token) missing.push("SHOPIFY_ADMIN_TOKEN");
-    if (missing.length) {
-      console.error("[WEBHOOK][ENV_MISSING]", missing, trace);
-      return res.status(500).json({ error: "ENV_MISSING_SHOPIFY", missing });
-    }
-
-    // ---- Completar la draft ----
-    const url = `https://${shop}/admin/api/2024-10/draft_orders/${draft_id}/complete.json`;
-    console.log("[SHOPIFY][DRAFT_COMPLETE][REQ]", trace, url);
-
-    const resp = await fetch(url, {
+    // ---- Intento A: body JSON ----
+    const urlA = `https://${shop}/admin/api/${version}/draft_orders/${draft_id}/complete.json`;
+    console.log("[SHOPIFY][REQ:A]", trace, urlA);
+    let resp = await fetch(urlA, {
       method: "POST",
       headers: {
         "X-Shopify-Access-Token": token,
         "Accept": "application/json",
         "Content-Type": "application/json"
       },
-      // Enviar SIEMPRE un JSON válido. Cambiá a true si querés que quede como pendiente.
       body: JSON.stringify({ payment_pending: false })
     });
+    let A = await readResp(resp);
 
-    const text = await resp.text();
-    let data; try { data = JSON.parse(text); } catch { data = { raw: text }; }
-
-    console.log("[SHOPIFY][DRAFT_COMPLETE][RESP]", trace, resp.status, data);
-
-    if (!resp.ok) {
-      // Si ya estaba completada, lo tomamos como OK idempotente
-      const msg = JSON.stringify(data || {});
-      if (msg.includes("has already been completed")) {
-        console.log("[SHOPIFY][DRAFT_COMPLETE][ALREADY]", trace, { draft_id });
-        return res.status(200).json({ ok: true, already_completed: true, draft_id });
-      }
-      return res.status(resp.status).json({ error: "DRAFT_COMPLETE_FAIL", detail: data || {} });
+    // Si falla 406/4xx, intentamos Variante B (querystring, sin body)
+    if (!A.ok) {
+      const urlB = `https://${shop}/admin/api/${version}/draft_orders/${draft_id}/complete.json?payment_pending=false`;
+      console.log("[SHOPIFY][REQ:B]", trace, urlB);
+      resp = await fetch(urlB, {
+        method: "POST",
+        headers: {
+          "X-Shopify-Access-Token": token,
+          "Accept": "application/json"
+          // sin Content-Type porque no hay body
+        }
+      });
+      var B = await readResp(resp);
+      if (B.ok) A = B;
     }
 
-    const orderId = data?.draft_order?.order_id || data?.order?.id || null;
-    console.log("[SHOPIFY][DRAFT_COMPLETE][OK]", trace, { draft_id, order_id: orderId });
+    // ¿ya estaba completada?
+    const bodyStr = (A?.text || "").toLowerCase();
+    if (!A.ok && bodyStr.includes("already been completed")) {
+      return res.status(200).json({ ok: true, already_completed: true, draft_id, request_id: A.rid });
+    }
 
-    return res.status(200).json({ ok: true, completed: true, draft_id, order_id: orderId });
+    if (!A.ok) {
+      return res.status(A.status).json({
+        error: "SHOPIFY_DRAFT_COMPLETE_FAILED",
+        status: A.status,
+        request_id: A.rid,
+        response_headers: A.headers,
+        body: A.text
+      });
+    }
+
+    // Parseamos si vino JSON; si no, devolvemos raw
+    let data; try { data = JSON.parse(A.text); } catch { data = { raw: A.text }; }
+    const orderId = data?.draft_order?.order_id || data?.order?.id || null;
+
+    return res.status(200).json({
+      ok: true,
+      completed: true,
+      draft_id,
+      order_id: orderId,
+      request_id: A.rid,
+      api_version: version,
+      data
+    });
   } catch (e) {
     console.error("[WEBHOOK][EXCEPTION]", trace, e);
-    return res.status(500).json({ error: "SERVER_ERROR", message: e.message, trace });
+    return res.status(500).json({ error: "SERVER_ERROR", message: e?.message, trace });
   }
 }
